@@ -10,10 +10,10 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Serve static files in uploads folder
+// Serve static files from uploads folder
 app.use("/uploads", express.static("uploads"));
 
-// Multer config to accept multiple files
+// Multer: handle multiple PDF uploads
 const upload = multer({ dest: "uploads/" });
 
 // Default route
@@ -21,13 +21,18 @@ app.get("/", (req, res) => {
   res.send("PDF Toolbox API is running!");
 });
 
-// Merge PDF route
+// Process route
 app.post("/process", upload.array("files"), async (req, res) => {
   const files = req.files;
   const tool = req.body.tool;
 
-  if (!files || files.length < 2 || !tool) {
-    return res.status(400).json({ error: "At least 2 files and tool name required" });
+  if (!files || files.length < 1 || !tool) {
+    return res.status(400).json({ error: "At least 1 file and tool name required" });
+  }
+
+  // Special rule: "Merge PDF" needs 2+
+  if (tool === "Merge PDF" && files.length < 2) {
+    return res.status(400).json({ error: "Merge requires at least 2 PDFs" });
   }
 
   if (tool !== "Merge PDF") {
