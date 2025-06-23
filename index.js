@@ -10,29 +10,55 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// File upload config
+// Serve static files in uploads folder
+app.use("/uploads", express.static("uploads"));
+
+// Multer config to accept multiple files
 const upload = multer({ dest: "uploads/" });
 
-// Test route
+// Default route
 app.get("/", (req, res) => {
   res.send("PDF Toolbox API is running!");
 });
 
-// POST route to handle PDF + tool
-app.post("/process", upload.single("file"), (req, res) => {
-  const file = req.file;
+// Merge PDF route
+app.post("/process", upload.array("files"), async (req, res) => {
+  const files = req.files;
   const tool = req.body.tool;
 
-  if (!file || !tool) {
-    return res.status(400).json({ error: "File or tool not provided" });
+  if (!files || files.length < 2 || !tool) {
+    return res.status(400).json({ error: "At least 2 files and tool name required" });
   }
 
-  console.log(`Received file: ${file.originalname}`);
-  console.log(`Tool selected: ${tool}`);
+  if (tool !== "Merge PDF") {
+    return res.json({ message: `${tool} in progress (not yet supported)` });
+  }
 
-  // TODO: Process PDF with selected tool
+  try {
+    const { PDFDocument } = await import("pdf-lib");
 
-  return res.json({ success: true, message: `${tool} in progress` });
+    const mergedPdf = await PDFDocument.create();
+
+    for (const file of files) {
+      const fileBytes = fs.readFileSync(file.path);
+      const pdf = await PDFDocument.load(fileBytes);
+      const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+      copiedPages.forEach((page) => mergedPdf.addPage(page));
+    }
+
+    const mergedBytes = await mergedPdf.save();
+
+    const outputPath = `uploads/merged-${Date.now()}.pdf`;
+    fs.writeFileSync(outputPath, mergedBytes);
+
+    return res.json({
+      message: "PDFs merged successfully!",
+      download: `https://${req.headers.host}/${outputPath}`,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Merge failed" });
+  }
 });
 
 app.listen(port, () => {
