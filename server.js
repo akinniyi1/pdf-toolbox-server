@@ -1,80 +1,48 @@
-import express from "express";
-import fs from "fs-extra";
-import cors from "cors";
 import multer from "multer";
-import path from "path";
-import { PDFDocument } from "pdf-lib";
 import archiver from "archiver";
+import { PDFDocument } from "pdf-lib";
+import fs from "fs-extra";
 
-const app = express();
-const PORT = process.env.PORT || 3000;
-const DATA_PATH = "./data/users.json";
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ dest: "uploads/" });
 
-app.use(cors());
-app.use(express.json());
-
-// Ensure users.json exists
-await fs.ensureFile(DATA_PATH);
-if (!(await fs.readJson(DATA_PATH).catch(() => false))) {
-  await fs.writeJson(DATA_PATH, {});
-}
-
-// Helper to read/write
-const readData = async () => fs.readJson(DATA_PATH);
-const writeData = async (data) => fs.writeJson(DATA_PATH, data);
-
-// Get user info
-app.get("/user/:id", async (req, res) => {
-  const users = await readData();
-  const user = users[req.params.id] || { pro: false, count: 0 };
-  res.json(user);
-});
-
-// Update usage or upgrade
-app.post("/user/:id", async (req, res) => {
-  const users = await readData();
-  const { count, pro } = req.body;
-  users[req.params.id] = { ...(users[req.params.id] || {}), count, pro };
-  await writeData(users);
-  res.json({ success: true });
-});
-
-// ✅ Main process route (Merge, Compress, Split, etc.)
 app.post("/process", upload.array("files"), async (req, res) => {
   const tool = req.body.tool;
   const files = req.files;
 
   if (!files || files.length === 0) {
-    return res.status(400).json({ message: "No files uploaded" });
+    return res.status(400).json({ message: "No files uploaded." });
   }
+
+  const outputPath = `./output/${Date.now()}_${tool.replace(" ", "_")}.pdf`;
+  await fs.ensureDir("./output");
 
   try {
     if (tool === "Merge PDF") {
       const mergedPdf = await PDFDocument.create();
       for (const file of files) {
-        const pdf = await PDFDocument.load(file.buffer);
+        const bytes = await fs.readFile(file.path);
+        const pdf = await PDFDocument.load(bytes);
         const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
         copiedPages.forEach((page) => mergedPdf.addPage(page));
       }
-      const pdfBytes = await mergedPdf.save();
-      const outPath = `./data/result_${Date.now()}.pdf`;
-      await fs.writeFile(outPath, pdfBytes);
-      return res.json({ download: `${req.protocol}://${req.get("host")}/download/${path.basename(outPath)}` });
+      const outBytes = await mergedPdf.save();
+      await fs.writeFile(outputPath, outBytes);
+
+    } else if (tool === "Compress PDF") {
+      // 🔧 Simple copy for demo. Real compression requires PDF tools.
+      await fs.copyFile(files[0].path, outputPath);
+
+    } else {
+      return res.status(400).json({ message: "Tool not implemented yet." });
     }
 
-    // Add more tools here later...
+    return res.json({ download: outputPath.replace("./", "/") });
 
-    res.status(400).json({ message: "Tool not implemented yet" });
   } catch (err) {
-    console.error("Process Error:", err);
-    res.status(500).json({ message: "Processing failed" });
+    console.error("Processing failed:", err);
+    res.status(500).json({ message: "Server error" });
+  } finally {
+    // Cleanup uploaded files
+    files.forEach(file => fs.remove(file.path));
   }
-});
-
-// Serve download files
-app.use("/download", express.static("data"));
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
 });
