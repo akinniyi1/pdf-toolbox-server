@@ -1,16 +1,15 @@
 import express from "express";
 import fs from "fs-extra";
 import cors from "cors";
+import multer from "multer";
 import path from "path";
-import TelegramBot from "node-telegram-bot-api";
-import dotenv from "dotenv";
-
-dotenv.config(); // Load .env variables
+import { PDFDocument } from "pdf-lib";
+import archiver from "archiver";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DATA_PATH = "./data/users.json";
-const WEBAPP_URL = "https://pdf-toolbox-client.onrender.com"; // your frontend
+const upload = multer({ storage: multer.memoryStorage() });
 
 app.use(cors());
 app.use(express.json());
@@ -41,25 +40,40 @@ app.post("/user/:id", async (req, res) => {
   res.json({ success: true });
 });
 
-// ✅ Telegram Bot (inline WebApp button)
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+// ✅ Main process route (Merge, Compress, Split, etc.)
+app.post("/process", upload.array("files"), async (req, res) => {
+  const tool = req.body.tool;
+  const files = req.files;
 
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
+  if (!files || files.length === 0) {
+    return res.status(400).json({ message: "No files uploaded" });
+  }
 
-  bot.sendMessage(chatId, "👋 Welcome to PDF Toolbox Bot. Tap the button below to start:", {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          {
-            text: "🚀 Open PDF Toolbox",
-            web_app: { url: WEBAPP_URL }
-          }
-        ]
-      ]
+  try {
+    if (tool === "Merge PDF") {
+      const mergedPdf = await PDFDocument.create();
+      for (const file of files) {
+        const pdf = await PDFDocument.load(file.buffer);
+        const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+        copiedPages.forEach((page) => mergedPdf.addPage(page));
+      }
+      const pdfBytes = await mergedPdf.save();
+      const outPath = `./data/result_${Date.now()}.pdf`;
+      await fs.writeFile(outPath, pdfBytes);
+      return res.json({ download: `${req.protocol}://${req.get("host")}/download/${path.basename(outPath)}` });
     }
-  });
+
+    // Add more tools here later...
+
+    res.status(400).json({ message: "Tool not implemented yet" });
+  } catch (err) {
+    console.error("Process Error:", err);
+    res.status(500).json({ message: "Processing failed" });
+  }
 });
+
+// Serve download files
+app.use("/download", express.static("data"));
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
