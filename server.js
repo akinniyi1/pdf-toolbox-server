@@ -17,21 +17,44 @@ if (!(await fs.readJson(DATA_PATH).catch(() => false))) {
 const readData = async () => fs.readJson(DATA_PATH);
 const writeData = async (data) => fs.writeJson(DATA_PATH, data);
 
+// GET user info with auto-downgrade if expired
 app.get("/user/:id", async (req, res) => {
   const users = await readData();
-  const user = users[req.params.id] || { pro: false, count: 0 };
+  const id = req.params.id;
+
+  let user = users[id] || {
+    pro: false,
+    count: 0,
+    proUntil: null,
+  };
+
+  if (user.pro && user.proUntil) {
+    const now = Date.now();
+    const expiry = new Date(user.proUntil).getTime();
+    if (now > expiry) {
+      user.pro = false;
+      user.proUntil = null;
+      users[id] = user;
+      await writeData(users);
+    }
+  }
+
   res.json(user);
 });
 
+// UPDATE user info
 app.post("/user/:id", async (req, res) => {
   const users = await readData();
+  const id = req.params.id;
   const { count, pro, proUntil } = req.body;
-  users[req.params.id] = {
-    ...(users[req.params.id] || {}),
+
+  users[id] = {
+    ...(users[id] || {}),
     ...(count !== undefined && { count }),
     ...(pro !== undefined && { pro }),
     ...(proUntil !== undefined && { proUntil }),
   };
+
   await writeData(users);
   res.json({ success: true });
 });
