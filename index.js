@@ -1,78 +1,98 @@
 import express from "express";
 import cors from "cors";
 import fs from "fs-extra";
+import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DATA_PATH = "/mnt/data/users.json";
-const MESSAGES_PATH = "/mnt/data/support_messages.json";
 
 app.use(cors());
 app.use(express.json());
 
-// Ensure files exist
+// Ensure the data file exists
 await fs.ensureFile(DATA_PATH);
-await fs.ensureFile(MESSAGES_PATH);
-if (!(await fs.readJson(DATA_PATH).catch(() => false))) await fs.writeJson(DATA_PATH, {});
-if (!(await fs.readJson(MESSAGES_PATH).catch(() => false))) await fs.writeJson(MESSAGES_PATH, []);
+if (!(await fs.readJson(DATA_PATH).catch(() => false))) {
+  await fs.writeJson(DATA_PATH, {});
+}
 
 // Helper functions
 const readUsers = async () => fs.readJson(DATA_PATH);
-const writeUsers = async (data) => fs.writeJson(DATA_PATH, data);
-const readMessages = async () => fs.readJson(MESSAGES_PATH);
-const writeMessages = async (data) => fs.writeJson(MESSAGES_PATH, data);
+const writeUsers = async (users) => fs.writeJson(DATA_PATH, users);
 
-// Register
-app.post("/register", async (req, res) => {
+// Signup route
+app.post("/signup", async (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: "Missing fields" });
+
+  if (!email || !password) return res.status(400).json({ error: "Email and password are required" });
 
   const users = await readUsers();
-  if (users[email]) return res.status(409).json({ error: "Email already exists" });
 
-  users[email] = { email, password, pro: false, count: 0, created: Date.now() };
+  if (users[email]) {
+    return res.status(400).json({ error: "User already exists" });
+  }
+
+  users[email] = {
+    email,
+    password,
+    pro: false,
+    count: 0,
+    messages: [],
+    createdAt: new Date().toISOString(),
+  };
+
   await writeUsers(users);
   res.json({ success: true });
 });
 
-// Login
+// Login route
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
+
   const users = await readUsers();
   const user = users[email];
+
   if (!user || user.password !== password) {
-    return res.status(401).json({ error: "Invalid login" });
+    return res.status(401).json({ error: "Invalid credentials" });
   }
+
   res.json({ success: true, user });
 });
 
-// Get all users (admin only)
-app.get("/admin/users", async (req, res) => {
-  const email = req.query.email;
-  if (email !== "akinrinadeakinniyi9@gmail.com") return res.status(403).json({ error: "Forbidden" });
-
+// Get user info
+app.get("/user/:email", async (req, res) => {
   const users = await readUsers();
-  res.json(users);
+  const user = users[req.params.email];
+
+  if (!user) return res.status(404).json({ error: "User not found" });
+
+  res.json(user);
 });
 
-// Support message
-app.post("/support", async (req, res) => {
-  const { email, message } = req.body;
-  if (!email || !message) return res.status(400).json({ error: "Missing data" });
-
-  const messages = await readMessages();
-  messages.push({ email, message, time: new Date().toISOString() });
-  await writeMessages(messages);
+// Update user (e.g. upgrade to pro, count usage)
+app.post("/user/:email", async (req, res) => {
+  const users = await readUsers();
+  const existing = users[req.params.email] || {};
+  users[req.params.email] = { ...existing, ...req.body };
+  await writeUsers(users);
   res.json({ success: true });
 });
 
-// Get all messages (admin only)
-app.get("/admin/messages", async (req, res) => {
-  const email = req.query.email;
-  if (email !== "akinrinadeakinniyi9@gmail.com") return res.status(403).json({ error: "Forbidden" });
+// Contact support
+app.post("/support", async (req, res) => {
+  const { email, message } = req.body;
 
-  const messages = await readMessages();
-  res.json(messages);
+  if (!email || !message) return res.status(400).json({ error: "Email and message required" });
+
+  const users = await readUsers();
+  const user = users[email];
+
+  if (!user) return res.status(404).json({ error: "User not found" });
+
+  user.messages.push({ message, time: new Date().toISOString() });
+
+  await writeUsers(users);
+  res.json({ success: true });
 });
 
 app.listen(PORT, () => {
