@@ -1,48 +1,45 @@
-import multer from "multer";
-import archiver from "archiver";
-import { PDFDocument } from "pdf-lib";
+import express from "express";
 import fs from "fs-extra";
+import cors from "cors";
+import path from "path";
 
-const upload = multer({ dest: "uploads/" });
+const app = express();
+const PORT = process.env.PORT || 3000;
+const DATA_PATH = "/mnt/data/users.json"; // use Render disk here
 
-app.post("/process", upload.array("files"), async (req, res) => {
-  const tool = req.body.tool;
-  const files = req.files;
+app.use(cors());
+app.use(express.json());
 
-  if (!files || files.length === 0) {
-    return res.status(400).json({ message: "No files uploaded." });
-  }
+// Ensure users.json exists on render disk
+await fs.ensureFile(DATA_PATH);
+if (!(await fs.readJson(DATA_PATH).catch(() => false))) {
+  await fs.writeJson(DATA_PATH, {});
+}
 
-  const outputPath = `./output/${Date.now()}_${tool.replace(" ", "_")}.pdf`;
-  await fs.ensureDir("./output");
+// Helpers to read/write JSON
+const readData = async () => fs.readJson(DATA_PATH);
+const writeData = async (data) => fs.writeJson(DATA_PATH, data);
 
-  try {
-    if (tool === "Merge PDF") {
-      const mergedPdf = await PDFDocument.create();
-      for (const file of files) {
-        const bytes = await fs.readFile(file.path);
-        const pdf = await PDFDocument.load(bytes);
-        const copiedPages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
-        copiedPages.forEach((page) => mergedPdf.addPage(page));
-      }
-      const outBytes = await mergedPdf.save();
-      await fs.writeFile(outputPath, outBytes);
+// Get user info
+app.get("/user/:username", async (req, res) => {
+  const users = await readData();
+  const user = users[req.params.username] || { pro: false, count: 0 };
+  res.json(user);
+});
 
-    } else if (tool === "Compress PDF") {
-      // 🔧 Simple copy for demo. Real compression requires PDF tools.
-      await fs.copyFile(files[0].path, outputPath);
+// Update user data
+app.post("/user/:username", async (req, res) => {
+  const users = await readData();
+  const { count, pro } = req.body;
+  users[req.params.username] = {
+    ...(users[req.params.username] || {}),
+    ...(count !== undefined ? { count } : {}),
+    ...(pro !== undefined ? { pro } : {}),
+  };
+  await writeData(users);
+  res.json({ success: true });
+});
 
-    } else {
-      return res.status(400).json({ message: "Tool not implemented yet." });
-    }
-
-    return res.json({ download: outputPath.replace("./", "/") });
-
-  } catch (err) {
-    console.error("Processing failed:", err);
-    res.status(500).json({ message: "Server error" });
-  } finally {
-    // Cleanup uploaded files
-    files.forEach(file => fs.remove(file.path));
-  }
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
 });
