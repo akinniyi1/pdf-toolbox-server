@@ -1,55 +1,71 @@
 import express from "express";
 import cors from "cors";
+import fs from "fs-extra";
 import multer from "multer";
-import fs from "fs";
-import path from "path";
 import archiver from "archiver";
-import TelegramBot from "node-telegram-bot-api";
-import { PDFDocument } from "pdf-lib";
+import path from "path";
+import { fileURLToPath } from "url";
 
+// Setup __dirname in ES Module style
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Paths
+const DATA_PATH = "/mnt/data/users.json";
+const UPLOAD_DIR = path.join(__dirname, "uploads");
+
+// Initialize
 const app = express();
-const port = process.env.PORT || 3000;
-const uploadDir = "uploads";
+const PORT = process.env.PORT || 3000;
 
-// Telegram bot setup
-const botToken = "7950996097:AAFZ6otnKgYaeg7dPmV8ea5zacpkXqKkpY4";
-const bot = new TelegramBot(botToken, { polling: true });
-
-bot.onText(/\/start/, (msg) => {
-  const chatId = msg.chat.id;
-  bot.sendMessage(chatId, "Welcome to PDF Toolbox!", {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          {
-            text: "📂 Open PDF Toolbox WebApp",
-            web_app: { url: "https://pdf-toolbox-client.onrender.com" },
-          },
-        ],
-      ],
-    },
-  });
-});
-
-// Middleware
 app.use(cors());
 app.use(express.json());
+app.use("/uploads", express.static(UPLOAD_DIR));
 
-// Ensure upload folder exists
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
+// Ensure disk storage exists
+await fs.ensureFile(DATA_PATH);
+if (!(await fs.readJson(DATA_PATH).catch(() => false))) {
+  await fs.writeJson(DATA_PATH, {});
 }
+await fs.ensureDir(UPLOAD_DIR);
 
-// Serve static files
-app.use("/uploads", express.static(uploadDir));
-const upload = multer({ dest: uploadDir + "/" });
+// Multer setup
+const upload = multer({ dest: UPLOAD_DIR + "/" });
 
-// Root endpoint
-app.get("/", (req, res) => {
-  res.send("PDF Toolbox API is running!");
+// Disk read/write functions
+const readData = async () => fs.readJson(DATA_PATH);
+const writeData = async (data) => fs.writeJson(DATA_PATH, data);
+
+// ===========================
+// USER ROUTES
+// ===========================
+
+app.get("/user/:id", async (req, res) => {
+  const users = await readData();
+  const user = users[req.params.id];
+  if (!user) {
+    return res.status(404).json({ error: "User not found" });
+  }
+  res.json(user);
 });
 
-// Tool processing endpoint
+app.post("/user/:id", async (req, res) => {
+  const users = await readData();
+  const { count, pro, proUntil } = req.body;
+  users[req.params.id] = {
+    ...(users[req.params.id] || {}),
+    ...(count !== undefined && { count }),
+    ...(pro !== undefined && { pro }),
+    ...(proUntil !== undefined && { proUntil }),
+  };
+  await writeData(users);
+  res.json({ success: true });
+});
+
+// ===========================
+// PROCESSING ROUTE
+// ===========================
+
 app.post("/process", upload.array("files"), async (req, res) => {
   const files = req.files;
   const tool = req.body.tool;
@@ -59,8 +75,13 @@ app.post("/process", upload.array("files"), async (req, res) => {
   }
 
   try {
+    const { PDFDocument } = await import("pdf-lib");
+
+    // MERGE
     if (tool === "Merge PDF") {
-      if (files.length < 2) return res.status(400).json({ error: "Merge needs at least 2 PDFs" });
+      if (files.length < 2) {
+        return res.status(400).json({ error: "Merge requires at least 2 PDFs" });
+      }
 
       const mergedPdf = await PDFDocument.create();
       for (const file of files) {
@@ -71,30 +92,16 @@ app.post("/process", upload.array("files"), async (req, res) => {
       }
       const mergedBytes = await mergedPdf.save();
       const outName = `merged-${Date.now()}.pdf`;
-      const outputPath = path.join(uploadDir, outName);
+      const outputPath = path.join(UPLOAD_DIR, outName);
       fs.writeFileSync(outputPath, mergedBytes);
 
       return res.json({
-        message: "PDFs merged!",
-        download: `https://${req.headers.host}/uploads/${outName}`
+        message: "PDFs merged successfully!",
+        download: `${req.protocol}://${req.headers.host}/uploads/${outName}`,
       });
     }
 
-    if (tool === "Compress PDF") {
-      const file = files[0];
-      const fileBytes = fs.readFileSync(file.path);
-      const pdf = await PDFDocument.load(fileBytes);
-      const compressedBytes = await pdf.save();
-      const outName = `compressed-${Date.now()}.pdf`;
-      const outputPath = path.join(uploadDir, outName);
-      fs.writeFileSync(outputPath, compressedBytes);
-
-      return res.json({
-        message: "PDF compressed (naive).",
-        download: `https://${req.headers.host}/uploads/${outName}`
-      });
-    }
-
+    // SPLIT
     if (tool === "Split PDF") {
       const file = files[0];
       const fileBytes = fs.readFileSync(file.path);
@@ -102,45 +109,59 @@ app.post("/process", upload.array("files"), async (req, res) => {
       const totalPages = pdf.getPageCount();
 
       const zipName = `split-${Date.now()}.zip`;
-      const zipPath = path.join(uploadDir, zipName);
+      const zipPath = path.join(UPLOAD_DIR, zipName);
       const output = fs.createWriteStream(zipPath);
       const archive = archiver("zip", { zlib: { level: 9 } });
 
       archive.pipe(output);
-
       for (let i = 0; i < totalPages; i++) {
         const newPdf = await PDFDocument.create();
-        const [copiedPage] = await newPdf.copyPages(pdf, [i]);
-        newPdf.addPage(copiedPage);
+        const [page] = await newPdf.copyPages(pdf, [i]);
+        newPdf.addPage(page);
         const pdfBytes = await newPdf.save();
         archive.append(Buffer.from(pdfBytes), { name: `page-${i + 1}.pdf` });
       }
 
       await archive.finalize();
-
       output.on("close", () => {
         return res.json({
-          message: `Split into ${totalPages} pages.`,
-          download: `https://${req.headers.host}/uploads/${zipName}`
+          message: "PDF split successfully!",
+          download: `${req.protocol}://${req.headers.host}/uploads/${zipName}`,
         });
       });
 
       output.on("error", (err) => {
         console.error(err);
-        return res.status(500).json({ error: "Split failed" });
+        return res.status(500).json({ error: "Failed to create zip" });
       });
-
       return;
     }
 
-    return res.status(400).json({ error: "Unknown or unsupported tool." });
+    // COMPRESS
+    if (tool === "Compress PDF") {
+      const file = files[0];
+      const fileBytes = fs.readFileSync(file.path);
+      const pdf = await PDFDocument.load(fileBytes);
+      const compressedBytes = await pdf.save();
 
+      const outName = `compressed-${Date.now()}.pdf`;
+      const outputPath = path.join(UPLOAD_DIR, outName);
+      fs.writeFileSync(outputPath, compressedBytes);
+
+      return res.json({
+        message: "PDF compressed (naively).",
+        download: `${req.protocol}://${req.headers.host}/uploads/${outName}`,
+      });
+    }
+
+    // UNIMPLEMENTED TOOLS
+    return res.status(400).json({ error: "Tool not implemented yet." });
   } catch (err) {
-    console.error("Processing error:", err);
+    console.error(err);
     return res.status(500).json({ error: "Processing failed." });
   }
 });
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
