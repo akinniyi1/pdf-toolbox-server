@@ -2,107 +2,73 @@ import express from "express";
 import cors from "cors";
 import fs from "fs-extra";
 import multer from "multer";
+import { PDFDocument } from "pdf-lib";
 import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DATA_PATH = "/mnt/data/users.json";
 
-// Setup
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Ensure user database file exists
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
 await fs.ensureFile(DATA_PATH);
 if (!(await fs.readJson(DATA_PATH).catch(() => false))) {
   await fs.writeJson(DATA_PATH, {});
 }
 
-// Helper functions
 const readData = async () => fs.readJson(DATA_PATH);
 const writeData = async (data) => fs.writeJson(DATA_PATH, data);
 
-// File upload middleware
-const upload = multer({
-  dest: "/mnt/data/uploads",
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB limit
-});
-
-// Test root route
-app.get("/", (req, res) => {
-  res.send("PDF Toolbox backend is running.");
-});
-
-// Get user info (with auto downgrade if pro expired)
-app.get("/user/:id", async (req, res) => {
-  const users = await readData();
-  const id = req.params.id;
-
-  let user = users[id] || { count: 0, pro: false, proUntil: null };
-
-  // Auto-downgrade if pro expired
-  if (user.pro && user.proUntil) {
-    const now = Date.now();
-    const expiry = new Date(user.proUntil).getTime();
-    if (now > expiry) {
-      user.pro = false;
-      user.proUntil = null;
-      users[id] = user;
-      await writeData(users);
-    }
-  }
-
-  res.json(user);
-});
-
-// Update user info
-app.post("/user/:id", async (req, res) => {
-  const users = await readData();
-  const id = req.params.id;
-  const { count, pro, proUntil, username, avatar } = req.body;
-
-  users[id] = {
-    ...(users[id] || {}),
-    ...(count !== undefined && { count }),
-    ...(pro !== undefined && { pro }),
-    ...(proUntil !== undefined && { proUntil }),
-    ...(username !== undefined && { username }),
-    ...(avatar !== undefined && { avatar }),
-  };
-
-  await writeData(users);
-  res.json({ success: true });
-});
-
-// Process uploaded PDF
 app.post("/process", upload.single("file"), async (req, res) => {
-  const { tool, userId } = req.body;
+  const tool = req.body.tool;
   const file = req.file;
 
-  if (!file || !tool || !userId) {
-    return res.status(400).json({ error: "Missing file, tool, or user ID" });
+  if (!file || !tool) {
+    return res.status(400).json({ error: "Missing file or tool" });
   }
 
-  // Simulate processing and increase usage
-  const users = await readData();
-  const user = users[userId] || { count: 0, pro: false };
+  try {
+    const inputPdf = await PDFDocument.load(file.buffer);
+    let outputPdf;
 
-  if (!user.pro && user.count >= 3) {
-    return res.status(403).json({ error: "Free limit reached. Upgrade to Pro." });
+    switch (tool) {
+      case "Compress PDF":
+        outputPdf = inputPdf;
+        break;
+
+      case "Merge PDF":
+        outputPdf = await PDFDocument.create();
+        const copiedPages = await outputPdf.copyPages(inputPdf, inputPdf.getPageIndices());
+        copiedPages.forEach((page) => outputPdf.addPage(page));
+        break;
+
+      case "Split PDF":
+        outputPdf = await PDFDocument.create();
+        const firstPage = await outputPdf.copyPages(inputPdf, [0]);
+        outputPdf.addPage(firstPage[0]);
+        break;
+
+      default:
+        return res.status(400).json({ error: "Tool not implemented yet" });
+    }
+
+    const pdfBytes = await outputPdf.save();
+    res.set({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `attachment; filename=processed.pdf`,
+    });
+    res.send(pdfBytes);
+  } catch (err) {
+    console.error("Error processing PDF:", err);
+    res.status(500).json({ error: "Something went wrong during PDF processing" });
   }
-
-  // Simulate: In real case, you'd do something with the file
-  const newCount = (user.count || 0) + 1;
-  users[userId] = { ...user, count: newCount };
-  await writeData(users);
-
-  // Delete uploaded file after simulation
-  await fs.remove(file.path);
-
-  res.json({ message: `Your file has been processed with "${tool}". Used ${newCount}/3 tools.` });
 });
 
-// Start server
 app.listen(PORT, () => {
-  console.log(`✅ Server running at http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
