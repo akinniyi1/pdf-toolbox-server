@@ -1,87 +1,91 @@
 import express from "express";
 import cors from "cors";
+import multer from "multer";
 import fs from "fs-extra";
-import { Telegraf, Markup } from "telegraf";
+import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const BOT_TOKEN = process.env.BOT_TOKEN;
 const DATA_PATH = "/mnt/data/users.json";
+const UPLOAD_PATH = "/mnt/data/uploads";
 
-const bot = new Telegraf(BOT_TOKEN);
+const upload = multer({ dest: UPLOAD_PATH });
 
 app.use(cors());
 app.use(express.json());
 
-// Ensure users.json exists
+// Ensure data files/folders exist
+await fs.ensureDir(UPLOAD_PATH);
 await fs.ensureFile(DATA_PATH);
 if (!(await fs.readJson(DATA_PATH).catch(() => false))) {
   await fs.writeJson(DATA_PATH, {});
 }
 
-const readUsers = async () => fs.readJson(DATA_PATH);
-const writeUsers = async (data) => fs.writeJson(DATA_PATH, data);
+// Read/Write user data
+const readData = async () => fs.readJson(DATA_PATH);
+const writeData = async (data) => fs.writeJson(DATA_PATH, data);
 
-// Telegram bot start command
-bot.start(async (ctx) => {
-  const tgUser = ctx.from;
-  const id = `tg_${tgUser.id}`;
-  const users = await readUsers();
+// GET user info
+app.get("/user/:id", async (req, res) => {
+  const users = await readData();
+  const id = req.params.id;
 
-  if (!users[id]) {
-    const photo_url = tgUser.username
-      ? `https://t.me/i/userpic/320/${tgUser.username}.jpg`
-      : "";
+  let user = users[id] || {
+    pro: false,
+    count: 0,
+    proUntil: null,
+    name: "",
+  };
 
-    users[id] = {
-      first_name: tgUser.first_name || "",
-      last_name: tgUser.last_name || "",
-      username: tgUser.username || "",
-      photo_url,
-      count: 0,
-      pro: false,
-      proUntil: null,
-    };
-
-    await writeUsers(users);
+  // Downgrade expired Pro
+  if (user.pro && user.proUntil) {
+    const now = Date.now();
+    const expiry = new Date(user.proUntil).getTime();
+    if (now > expiry) {
+      user.pro = false;
+      user.proUntil = null;
+      users[id] = user;
+      await writeData(users);
+    }
   }
 
-  const webAppUrl = "https://pdf-toolbox-client.onrender.com";
-
-  ctx.reply(
-    `👋 Hello, ${tgUser.first_name || "User"}!`,
-    Markup.inlineKeyboard([
-      Markup.button.webApp("🚀 Open PDF Toolbox", webAppUrl),
-    ])
-  );
-});
-
-// GET user by ID
-app.get("/user/:id", async (req, res) => {
-  const users = await readUsers();
-  const user = users[req.params.id] || null;
   res.json(user);
 });
 
-// UPDATE user data
+// POST update user info
 app.post("/user/:id", async (req, res) => {
-  const users = await readUsers();
+  const users = await readData();
   const id = req.params.id;
+  const { count, pro, proUntil, name } = req.body;
 
   users[id] = {
     ...(users[id] || {}),
-    ...req.body,
+    ...(count !== undefined && { count }),
+    ...(pro !== undefined && { pro }),
+    ...(proUntil !== undefined && { proUntil }),
+    ...(name !== undefined && { name }),
   };
 
-  await writeUsers(users);
+  await writeData(users);
   res.json({ success: true });
 });
 
-app.get("/", (req, res) => {
-  res.send("PDF Toolbox API Running");
+// Tool processing endpoint
+app.post("/process", upload.single("file"), async (req, res) => {
+  const { tool, userId } = req.body;
+  const file = req.file;
+
+  if (!file || !tool || !userId) {
+    return res.status(400).json({ error: "Missing file, tool or userId" });
+  }
+
+  console.log(`Received file ${file.originalname} for ${tool} from user ${userId}`);
+
+  // Simulate processing
+  return res.json({ success: true, message: `Tool '${tool}' processed successfully.` });
 });
 
-bot.launch();
+// Start server
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`✅ Server running on port ${PORT}`);
 });
