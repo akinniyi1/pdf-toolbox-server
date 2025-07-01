@@ -3,72 +3,136 @@ import cors from "cors";
 import fs from "fs-extra";
 import multer from "multer";
 import { PDFDocument } from "pdf-lib";
+import { Telegraf, Markup } from "telegraf";
 import path from "path";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const DATA_PATH = "/mnt/data/users.json";
 
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-const storage = multer.memoryStorage();
-const upload = multer({ storage });
-
+///////////////////////////////////////////////////////////////////////////////
+// Setup directory & storage
+///////////////////////////////////////////////////////////////////////////////
 await fs.ensureFile(DATA_PATH);
 if (!(await fs.readJson(DATA_PATH).catch(() => false))) {
   await fs.writeJson(DATA_PATH, {});
 }
+const readUsers = () => fs.readJson(DATA_PATH);
+const writeUsers = (u) => fs.writeJson(DATA_PATH, u);
 
-const readData = async () => fs.readJson(DATA_PATH);
-const writeData = async (data) => fs.writeJson(DATA_PATH, data);
+const upload = multer({ storage: multer.memoryStorage() }); // keep file in memory
 
+///////////////////////////////////////////////////////////////////////////////
+// Telegram Bot with Telegraf
+///////////////////////////////////////////////////////////////////////////////
+if (!BOT_TOKEN) console.warn("⚠️ BOT_TOKEN not set – bot won’t start");
+else {
+  const bot = new Telegraf(BOT_TOKEN);
+
+  bot.start(async (ctx) => {
+    const tg = ctx.from;
+    const id = `tg_${tg.id}`;
+    const users = await readUsers();
+
+    // persist basic profile
+    users[id] = users[id] || {
+      first_name: tg.first_name || "",
+      username: tg.username || "",
+      count: 0,
+      pro: false,
+      proUntil: null,
+    };
+    await writeUsers(users);
+
+    const webAppUrl = "https://pdf-toolbox-client.onrender.com"; // your frontend
+    return ctx.reply(
+      `👋 Hi ${tg.first_name}! Open the PDF Toolbox:`,
+      Markup.inlineKeyboard([Markup.button.webApp("🚀 Open PDF Toolbox", webAppUrl)])
+    );
+  });
+
+  bot.launch();
+  console.log("🤖 Telegram bot launched");
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Express Middleware & Root Route
+///////////////////////////////////////////////////////////////////////////////
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+app.get("/", (req, res) => {
+  res.send("✅ PDF Toolbox API is running");
+});
+
+///////////////////////////////////////////////////////////////////////////////
+// User GET/POST
+///////////////////////////////////////////////////////////////////////////////
+app.get("/user/:id", async (req, res) => {
+  const users = await readUsers();
+  const user = users[req.params.id];
+  if (!user) return res.status(404).json({ error: "User not found" });
+  res.json(user);
+});
+
+app.post("/user/:id", async (req, res) => {
+  const users = await readUsers();
+  const id = req.params.id;
+  users[id] = {
+    ...(users[id] || {}),
+    ...(req.body.first_name && { first_name: req.body.first_name }),
+    ...(req.body.username && { username: req.body.username }),
+  };
+  await writeUsers(users);
+  res.json({ success: true });
+});
+
+///////////////////////////////////////////////////////////////////////////////
+// PDF Processing: Merge / Split / Compress
+///////////////////////////////////////////////////////////////////////////////
 app.post("/process", upload.single("file"), async (req, res) => {
-  const tool = req.body.tool;
-  const file = req.file;
-
-  if (!file || !tool) {
-    return res.status(400).json({ error: "Missing file or tool" });
-  }
-
   try {
-    const inputPdf = await PDFDocument.load(file.buffer);
-    let outputPdf;
-
-    switch (tool) {
-      case "Compress PDF":
-        outputPdf = inputPdf;
-        break;
-
-      case "Merge PDF":
-        outputPdf = await PDFDocument.create();
-        const copiedPages = await outputPdf.copyPages(inputPdf, inputPdf.getPageIndices());
-        copiedPages.forEach((page) => outputPdf.addPage(page));
-        break;
-
-      case "Split PDF":
-        outputPdf = await PDFDocument.create();
-        const firstPage = await outputPdf.copyPages(inputPdf, [0]);
-        outputPdf.addPage(firstPage[0]);
-        break;
-
-      default:
-        return res.status(400).json({ error: "Tool not implemented yet" });
+    const { tool, userId } = req.body;
+    const fileBuffer = req.file?.buffer;
+    if (!tool || !fileBuffer) {
+      return res.status(400).json({ error: "Missing tool or file" });
     }
 
-    const pdfBytes = await outputPdf.save();
+    const pdf = await PDFDocument.load(fileBuffer);
+
+    let outPdf;
+    if (tool === "Merge PDF") {
+      // for demo merging a single file into itself
+      outPdf = await PDFDocument.create();
+      const pages = await outPdf.copyPages(pdf, pdf.getPageIndices());
+      pages.forEach((p) => outPdf.addPage(p));
+    } else if (tool === "Split PDF") {
+      outPdf = await PDFDocument.create();
+      const [first] = await outPdf.copyPages(pdf, [0]);
+      outPdf.addPage(first);
+    } else if (tool === "Compress PDF") {
+      outPdf = pdf; // no-op: pdf-lib doesn’t compress well
+    } else {
+      return res.status(400).json({ error: "Unknown tool" });
+    }
+
+    const outBytes = await outPdf.save();
     res.set({
       "Content-Type": "application/pdf",
-      "Content-Disposition": `attachment; filename=processed.pdf`,
+      "Content-Disposition": `attachment; filename=${tool.replace(/\s+/g, "_")}.pdf`,
     });
-    res.send(pdfBytes);
+    return res.send(Buffer.from(outBytes));
   } catch (err) {
-    console.error("Error processing PDF:", err);
-    res.status(500).json({ error: "Something went wrong during PDF processing" });
+    console.error("PDF process error:", err);
+    return res.status(500).json({ error: "PDF processing failed" });
   }
 });
 
+///////////////////////////////////////////////////////////////////////////////
+// Start Server
+///////////////////////////////////////////////////////////////////////////////
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🌐 Server listening on port ${PORT}`);
 });
